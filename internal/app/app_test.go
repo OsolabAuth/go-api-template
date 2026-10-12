@@ -23,7 +23,7 @@ func TestAccessLogIncludesResponseStatus(t *testing.T) {
 	} {
 		t.Run(tt.path, func(t *testing.T) {
 			var logs bytes.Buffer
-			router := Router(nil, slog.New(slog.NewJSONHandler(&logs, nil))).(*chi.Mux)
+			router := Router(nil, nil, slog.New(slog.NewJSONHandler(&logs, nil))).(*chi.Mux)
 			router.Get("/panic", func(http.ResponseWriter, *http.Request) { panic("test panic") })
 			router.Get("/empty", func(http.ResponseWriter, *http.Request) {})
 			request := httptest.NewRequest(http.MethodGet, tt.path, nil)
@@ -44,5 +44,15 @@ func TestAccessLogIncludesResponseStatus(t *testing.T) {
 				t.Fatalf("incorrect status or request ID in access log: %+v", entry)
 			}
 		})
+	}
+}
+
+func TestReadinessWithoutDatabase(t *testing.T) {
+	var logs bytes.Buffer
+	router := Router(nil, nil, slog.New(slog.NewJSONHandler(&logs, nil)))
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/ready", nil))
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("/ready status = %d, want 503", response.Code)
 	}
 }
