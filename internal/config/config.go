@@ -10,15 +10,19 @@ import (
 type Config struct {
 	Port              string
 	DatabaseURL       string
+	RedisURL          string
 	DBMaxConns        int32
 	ReadHeaderTimeout time.Duration
 	ShutdownTimeout   time.Duration
 }
 
 func Load() (Config, error) {
-	cfg := Config{Port: env("PORT", "8080"), DatabaseURL: os.Getenv("DATABASE_URL"), DBMaxConns: 5, ReadHeaderTimeout: 5 * time.Second, ShutdownTimeout: 10 * time.Second}
+	cfg := Config{Port: env("PORT", "8080"), DatabaseURL: os.Getenv("DATABASE_URL"), RedisURL: os.Getenv("REDIS_URL"), DBMaxConns: 5, ReadHeaderTimeout: 5 * time.Second, ShutdownTimeout: 10 * time.Second}
 	if cfg.DatabaseURL == "" {
 		return Config{}, errors.New("DATABASE_URL must be set")
+	}
+	if cfg.RedisURL == "" {
+		return Config{}, errors.New("REDIS_URL must be set")
 	}
 	if s := os.Getenv("DB_MAX_CONNS"); s != "" {
 		n, err := strconv.ParseInt(s, 10, 32)

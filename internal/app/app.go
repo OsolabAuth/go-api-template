@@ -14,9 +14,10 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 )
 
-func Router(db *pgxpool.Pool, logger *slog.Logger) http.Handler {
+func Router(db *pgxpool.Pool, redisClient *redis.Client, logger *slog.Logger) http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(func(next http.Handler) http.Handler {
@@ -39,8 +40,12 @@ func Router(db *pgxpool.Pool, logger *slog.Logger) http.Handler {
 	r.Get("/ready", func(w http.ResponseWriter, req *http.Request) {
 		ctx, cancel := context.WithTimeout(req.Context(), 2*time.Second)
 		defer cancel()
-		if err := db.Ping(ctx); err != nil {
+		if db == nil || db.Ping(ctx) != nil {
 			common.Error(w, req, 503, "database unavailable")
+			return
+		}
+		if redisClient == nil || redisClient.Ping(ctx).Err() != nil {
+			common.Error(w, req, 503, "redis unavailable")
 			return
 		}
 		common.JSON(w, 200, map[string]string{"status": "ready"})
@@ -48,8 +53,8 @@ func Router(db *pgxpool.Pool, logger *slog.Logger) http.Handler {
 	r.Mount("/api/v1/tasks", tasks.NewHandler(tasks.NewRepository(db), logger).Routes())
 	return r
 }
-func Run(ctx context.Context, cfg config.Config, db *pgxpool.Pool, logger *slog.Logger) error {
-	server := &http.Server{Addr: ":" + cfg.Port, Handler: Router(db, logger), ReadHeaderTimeout: cfg.ReadHeaderTimeout}
+func Run(ctx context.Context, cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client, logger *slog.Logger) error {
+	server := &http.Server{Addr: ":" + cfg.Port, Handler: Router(db, redisClient, logger), ReadHeaderTimeout: cfg.ReadHeaderTimeout}
 	serverErr := make(chan error, 1)
 	go func() { serverErr <- server.ListenAndServe() }()
 	logger.Info("server listening", "port", cfg.Port)

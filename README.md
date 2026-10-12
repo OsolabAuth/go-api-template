@@ -1,6 +1,6 @@
 # Go API テンプレートの使い方
 
-Go と PostgreSQL で API サーバーを作るためのテンプレートです。HTTP ルーティングに chi、DB 接続に pgxpool、ログに標準ライブラリの slog を使います。ORM は使わず、サンプルとしてタスクの作成・一覧・取得・削除 API を実装しています。
+Go と PostgreSQL で API サーバーを作るためのテンプレートです。このブランチでは、外部接続先を増やす例として Redis を追加しています。Redis は起動と readiness の必須依存です。HTTP ルーティングに chi、DB 接続に pgxpool、ログに標準ライブラリの slog を使います。ORM は使わず、サンプルとしてタスクの作成・一覧・取得・削除 API を実装しています。
 
 ローカルでは `.env` を使い、本番では実行環境から環境変数を渡します。Docker イメージのビルドに `.env` や DB 接続情報は不要です。
 
@@ -29,7 +29,7 @@ go mod download
 
 ## 2 ローカル用の環境変数を用意する
 
-`.env` がまだない場合に、サンプルをコピーします。既存の `.env` はそのまま使えます。
+`.env` がまだない場合に、サンプルをコピーします。既存の `.env` を使う場合は、`.env.example` の `REDIS_PORT` と `REDIS_URL` を追加してください。
 
 ```sh
 if [ ! -f .env ]; then cp .env.example .env; fi
@@ -46,20 +46,25 @@ if [ ! -f .env ]; then cp .env.example .env; fi
 | `POSTGRES_DB` | `appdb` | ローカル DB 名 |
 | `DATABASE_URL` | 他の変数から組み立てる接続 URL | ホストで起動する API の DB 接続先 |
 | `DB_MAX_CONNS` | `5` | API プロセスごとの最大 DB 接続数 |
+| `REDIS_PORT` | `6379` | ホスト側で Redis に接続するポート |
+| `REDIS_URL` | `redis://localhost:${REDIS_PORT}/0` | API の Redis 接続先。必須 |
 
 API はホスト上で起動し、サンプルの `DATABASE_URL` で `localhost` の DB に接続します。マイグレーション用コンテナは `db:5432` に接続します。
 
-別の API や DB とポートが競合する場合は、`.env` の `PORT` や `POSTGRES_PORT` を変更してください。DB のユーザー名・パスワード・DB 名は、DB ボリュームの初期作成時に適用されます。既存ボリュームに対して `.env` だけを変更しても、DB 内の認証情報は変わりません。
+別の API や DB とポートが競合する場合は、`.env` の `PORT`、`POSTGRES_PORT`、`REDIS_PORT` を変更してください。DB のユーザー名・パスワード・DB 名は、DB ボリュームの初期作成時に適用されます。既存ボリュームに対して `.env` だけを変更しても、DB 内の認証情報は変わりません。
 
 `.env` はシェルから読み込める `KEY=value` 形式で記述してください。Git と Docker のビルド対象から除外されており、ローカル開発専用です。
 
-## 3 DB と API を起動する
+## 3 DB・Redis・API を起動する
 
 Docker を起動した状態で、順に実行します。
 
 ```sh
 # PostgreSQL をバックグラウンドで起動
 make db-up
+
+# Redis を起動し、接続可能になるまで待つ
+make redis-up
 
 # テーブルを作成
 make migrate-up
@@ -70,7 +75,7 @@ make dev
 
 `make dev` を実行したターミナルは開いたままにします。標準設定では `http://localhost:8080` にアクセスできます。ソースを変更した場合は `Ctrl+C` で終了し、再度 `make dev` を実行してください。
 
-直接 `go run ./cmd/api` を実行する場合、`.env` は自動では読み込まれません。通常は `make dev` を使ってください。API は起動時に DB 接続を確認するため、DB に接続できないと起動しません。
+直接 `go run ./cmd/api` を実行する場合、`.env` は自動では読み込まれません。通常は `make dev` を使ってください。API は起動時に DB と Redis の接続を確認するため、どちらかに接続できないと起動しません。
 
 ## 4 API の動作を確認する
 
@@ -80,7 +85,7 @@ make dev
 # API プロセスの応答を確認
 curl -i http://localhost:8080/health
 
-# DB への接続を確認
+# DB と Redis への接続を確認
 curl -i http://localhost:8080/ready
 
 # タスクを作成
@@ -92,7 +97,7 @@ curl -i -X POST http://localhost:8080/api/v1/tasks \
 curl -i http://localhost:8080/api/v1/tasks
 ```
 
-正常時、ヘルスチェックと一覧は `200`、作成は `201` を返します。作成レスポンスの `id` を確認し、次の `TASK_ID` に設定します。
+正常時、ヘルスチェックと一覧は `200`、作成は `201` を返します。`/health` はプロセスの応答だけを確認します。`/ready` は DB と Redis を確認し、接続できない依存先があれば `503` を返します。作成レスポンスの `id` を確認し、次の `TASK_ID` に設定します。
 
 ```sh
 TASK_ID=1 # 実際に返された id に置き換える
@@ -112,13 +117,22 @@ curl -i -X DELETE "http://localhost:8080/api/v1/tasks/$TASK_ID"
 make test
 ```
 
-通常のテストは DB なしで実行できます。HTTP 経由の CRUD を PostgreSQL と合わせて確認する場合は、テスト用 DB の接続先を指定します。
+通常のテストは DB と Redis なしで実行できます。HTTP 経由の CRUD を PostgreSQL と合わせて確認する場合は、テスト用 DB の接続先を指定します。
 
 ```sh
 TEST_DATABASE_URL='postgres://app:app_dev_password@localhost:5432/appdb?sslmode=disable' go test ./internal/app -run '^TestTaskAPI$' -v
 ```
 
-この統合テストは専用の一時スキーマにマイグレーションを適用し、終了時にそのスキーマだけを削除します。既存のテーブルやデータは変更しません。接続ユーザーにはスキーマ作成権限が必要です。`TEST_DATABASE_URL` が未指定の場合、このテストだけスキップします。
+この統合テストは専用の一時スキーマにマイグレーションを適用し、終了時にそのスキーマだけを削除します。既存のテーブルやデータは変更しません。接続ユーザーにはスキーマ作成権限が必要です。`TEST_DATABASE_URL` が未指定の場合、このテストだけスキップします。タスク API の統合テストには Redis は不要です。
+
+Redis の接続と、DB・Redis が利用できるときだけ readiness が成功することも確認できます。テストは Redis への `PING` だけを使い、既存キーは変更しません。
+
+```sh
+TEST_DATABASE_URL='postgres://app:app_dev_password@localhost:5432/appdb?sslmode=disable' \
+TEST_REDIS_URL='redis://localhost:6379/0' go test ./... -v
+```
+
+`TEST_REDIS_URL` が未指定の場合、Redis の統合テストはスキップします。readiness の統合テストには両方の接続先が必要です。
 
 API は実行中のターミナルで `Ctrl+C` を押して終了します。DB などの Compose コンテナを停止・削除する場合は、次を実行します。DB データのボリュームは残ります。
 
@@ -126,7 +140,7 @@ API は実行中のターミナルで `Ctrl+C` を押して終了します。DB 
 docker compose --profile tools down
 ```
 
-次回は `make db-up` と `make dev` で再開できます。マイグレーションを追加した場合は、API を起動する前に `make migrate-up` も実行してください。
+次回は `make db-up`、`make redis-up`、`make dev` で再開できます。マイグレーションを追加した場合は、API を起動する前に `make migrate-up` も実行してください。
 
 ## 6 Docker イメージを作る
 
@@ -142,9 +156,9 @@ make build
 docker build -f docker/Dockerfile.prod -t go-api-template:local .
 ```
 
-この工程では `.env`、`DATABASE_URL`、稼働中の DB は不要です。依存パッケージとベースイメージの取得にはネットワーク接続が必要です。`.dockerignore` が環境変数ファイルを除外し、本番 Dockerfile はビルド用に Go のソースディレクトリだけをコピーします。
+この工程では `.env`、`DATABASE_URL`、`REDIS_URL`、稼働中の DB・Redis は不要です。依存パッケージとベースイメージの取得にはネットワーク接続が必要です。`.dockerignore` が環境変数ファイルを除外し、本番 Dockerfile はビルド用に Go のソースディレクトリだけをコピーします。
 
-完成したイメージを起動するときには、コンテナから接続可能な `DATABASE_URL` が必要です。ホスト起動用の `.env` にある `localhost` は、コンテナ内ではそのコンテナ自身を指すため、そのまま流用しないでください。
+完成したイメージを起動するときには、コンテナから接続可能な `DATABASE_URL` と `REDIS_URL` が必要です。ホスト起動用の `.env` にある `localhost` は、コンテナ内ではそのコンテナ自身を指すため、そのまま流用しないでください。
 
 ## 7 本番環境へリリースする
 
@@ -156,11 +170,11 @@ GitHub Actions を追加するときは、次の順序にします。ワーク�
 4. 本番 DB に対して、専用のジョブなどからマイグレーションを実行する。
 5. 実行環境に環境変数とシークレット参照を設定し、イメージをデプロイする。
 
-通常の設定値はデプロイ用 YAML やデプロイコマンドから、DB 接続情報は GCP Secret Manager から環境変数として渡します。GitHub Actions のジョブに環境変数を設定するだけでは、Cloud Run の実行環境には引き継がれません。[Cloud Run の環境変数設定](https://cloud.google.com/run/docs/configuring/services/environment-variables)でサービス側にも設定してください。
+通常の設定値はデプロイ用 YAML やデプロイコマンドから、DB・Redis 接続情報は GCP Secret Manager から環境変数として渡します。TLS が必要な Redis には `rediss://` の URL を指定します。GitHub Actions のジョブに環境変数を設定するだけでは、Cloud Run の実行環境には引き継がれません。[Cloud Run の環境変数設定](https://cloud.google.com/run/docs/configuring/services/environment-variables)でサービス側にも設定してください。
 
 Cloud Run では、実行用サービスアカウントに対象シークレットの `roles/secretmanager.secretAccessor` 権限を付与します。Secret Manager の値を環境変数として使う場合は、バージョンを固定するとリリースごとの設定を管理できます。[Cloud Run のシークレット設定](https://cloud.google.com/run/docs/configuring/services/secrets)
 
-GCP の認証、Artifact Registry のリポジトリ、本番 DB とその接続経路、シークレットを準備済みの場合のコマンド例です。値は自分の環境に置き換えてください。
+GCP の認証、Artifact Registry のリポジトリ、本番 DB・Redis とその接続経路、シークレットを準備済みの場合のコマンド例です。値は自分の環境に置き換えてください。
 
 ```sh
 PROJECT_ID="your-gcp-project"
@@ -170,6 +184,8 @@ SERVICE="go-api-example"
 IMAGE_TAG="release-001" # リリースごとに変える。CI ではコミット SHA などを使用
 SECRET_NAME="go-api-database-url"
 SECRET_VERSION="1"
+REDIS_SECRET_NAME="go-api-redis-url"
+REDIS_SECRET_VERSION="1"
 IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$REPOSITORY/$SERVICE:$IMAGE_TAG"
 
 gcloud auth configure-docker "$REGION-docker.pkg.dev"
@@ -181,15 +197,15 @@ gcloud run deploy "$SERVICE" \
   --image "$IMAGE" \
   --project "$PROJECT_ID" \
   --region "$REGION" \
-  --update-secrets "DATABASE_URL=$SECRET_NAME:$SECRET_VERSION" \
+  --update-secrets "DATABASE_URL=$SECRET_NAME:$SECRET_VERSION,REDIS_URL=$REDIS_SECRET_NAME:$REDIS_SECRET_VERSION" \
   --update-env-vars DB_MAX_CONNS=5
 ```
 
-Cloud Run 用の DB ネットワーク設定は別途必要です。Cloud SQL の Unix ソケット接続を使う構成では、インスタンス接続設定と実行用サービスアカウントの Cloud SQL Client 権限も用意してください。
+Cloud Run から DB・Redis に到達するネットワーク設定は別途必要です。Compose の Redis はローカル専用で、本番には作成されません。Cloud SQL の Unix ソケット接続を使う構成では、インスタンス接続設定と実行用サービスアカウントの Cloud SQL Client 権限も用意してください。
 
 アプリは実行環境の `PORT` を使い、全インターフェースで待ち受けます。DB の最大接続数はインスタンスごとに適用されるため、スケール後の合計接続数も考慮してください。サンプル API には認証がないので、公開範囲と認証を設定してから本番データを扱ってください。
 
-`make deploy` も用意されています。既存の環境変数やシークレット設定を保持し、`DATABASE_URL` と `DB_MAX_CONNS` を更新します。呼び出し元の環境変数または make の引数で `GCP_PROJECT`、`GCP_REGION`、`AR_REPOSITORY`、`SERVICE_NAME`、`DATABASE_URL_SECRET` を渡します。ローカルの `.env` は読み込みません。この簡易コマンドはイメージとシークレットに `latest` を使うため、バージョンを固定したリリースには上記の手順を使ってください。
+`make deploy` も用意されています。既存の環境変数やシークレット設定を保持し、`DATABASE_URL`、`REDIS_URL`、`DB_MAX_CONNS` を更新します。呼び出し元の環境変数または make の引数で `GCP_PROJECT`、`GCP_REGION`、`AR_REPOSITORY`、`SERVICE_NAME`、`DATABASE_URL_SECRET`、`REDIS_URL_SECRET` を渡します。ローカルの `.env` は読み込みません。この簡易コマンドはイメージとシークレットに `latest` を使うため、バージョンを固定したリリースには上記の手順を使ってください。
 
 ## 8 新しい API サーバーとして使う
 
@@ -214,6 +230,7 @@ make test
 | `internal/app/app.go` | ルーティングと HTTP サーバー設定 |
 | `internal/config` | 環境変数の読み込み |
 | `internal/database` | DB 接続プール |
+| `internal/cache` | Redis 接続クライアント |
 | `internal/common/json.go` | JSON の読み書きとエラーレスポンス |
 | `internal/resources/tasks` | サンプルのモデル・ハンドラー・SQL |
 | `migrations` | DB スキーマの変更 |
@@ -222,11 +239,32 @@ make test
 
 新しい DB で使い始める前ならサンプルのマイグレーションを置き換えられます。運用開始後は適用済みのファイルを編集せず、新しい番号のマイグレーションを追加してください。API はマイグレーションを自動実行しません。
 
+## 9 接続先追加の差分を読む
+
+このブランチは `main` を起点に Redis 接続を追加した、独立した開発サンプルです。
+
+```sh
+git diff main...example/redis-connection
+```
+
+差分は次の順に読むと、設定から起動・終了までのつながりが分かります。
+
+1. `go.mod` / `go.sum`：Redis クライアントの追加。Go 1.23 と互換性のある [go-redis/v9 v9.7.3](https://github.com/redis/go-redis/blob/v9.7.3/go.mod) を使用します。
+2. `.env.example` / `internal/config`：接続 URL を環境変数で受け取り、必須項目として検証します。
+3. `internal/cache/redis.go`：URL の解析、クライアント作成、`PING` による接続確認、失敗時の解放をまとめます。context の期限も Redis 通信へ反映します。
+4. `cmd/api/main.go`：クライアントを一度だけ作成し、HTTP サーバーに渡して終了時に閉じます。初期化を `run()` に置くことで、エラー終了でも接続を解放します。
+5. `internal/app/app.go`：`/ready` の確認対象に Redis を加えます。DB と Redis を合わせて 2 秒の期限で確認します。
+6. `compose.yaml` / `Makefile`：開発用 Redis の起動と、本番の `REDIS_URL` シークレット設定を追加します。
+7. `internal/cache/*_test.go` / `internal/app/redis_integration_test.go`：不正な設定、接続中止、接続成功、依存先が使えないときの `503` を確認します。
+
+この例では Redis をアプリの必須依存として扱います。Redis が停止すると、タスク自体の保存先は PostgreSQL のままでも `/ready` は `503` になります。タスクのキャッシュやキーの読み書きは追加していません。ローカル Redis のポートは `127.0.0.1` にだけ公開し、永続化用ボリュームは用意していません。
+
 ## コマンド一覧
 
 | コマンド | 内容 |
 | --- | --- |
 | `make db-up` | ローカル PostgreSQL の起動 |
+| `make redis-up` | ローカル Redis の起動とヘルスチェック待機 |
 | `make migrate-up` | 未適用のローカル DB マイグレーションを適用 |
 | `make migrate-down` | ローカル DB のマイグレーションを一つ戻す。サンプルでは tasks テーブルとデータが削除される |
 | `make dev` | `.env` を読み込んでホスト上で API を起動 |
@@ -238,12 +276,13 @@ make test
 
 ### 起動からリクエスト処理までの流れ
 
-起動時は `main.go` が設定を読み、DB 接続プールを作ってから HTTP サーバーを起動します。接続プールは、複数のリクエストで DB 接続を再利用するための仕組みです。
+起動時は `main.go` が設定を読み、DB 接続プールと Redis クライアントを作ってから HTTP サーバーを起動します。接続プールは、複数のリクエストで DB 接続を再利用するための仕組みです。
 
 ```text
 cmd/api/main.go
   → config.Load()       環境変数を読み込む
   → database.Open()     DB 接続プールを作り、接続を確認する
+  → cache.Open()        Redis クライアントを作り、接続を確認する
   → app.Run()           HTTP サーバーを起動する
       → app.Router()    URL と処理を結び付ける
 ```
@@ -266,19 +305,19 @@ POST /api/v1/tasks
 
 **[cmd/api/main.go](cmd/api/main.go)**
 
-アプリケーションの入口です。JSON 形式のログ出力、設定の読み込み、DB 接続、HTTP サーバー起動を組み立てます。起動時の DB 接続確認には 10 秒の期限を設定し、`SIGINT` と `SIGTERM` を受け取ると終了処理に進みます。通常終了時は `defer db.Close()` で DB 接続を閉じます。エラー時の `os.Exit(1)` では defer は実行されません。
+アプリケーションの入口です。JSON 形式のログ出力、設定の読み込み、DB・Redis 接続、HTTP サーバー起動を組み立てます。起動時の接続確認には合計 10 秒の期限を設定し、`SIGINT` と `SIGTERM` を受け取ると終了処理に進みます。接続の作成と `defer Close()` は `run()` 内にあるため、通常終了・エラー終了のどちらでも接続を閉じてから `main()` に戻ります。
 
 起動時に外部サービスのクライアントを作るなど、アプリ全体の初期化を追加するときに変更します。
 
 **[internal/config/config.go](internal/config/config.go)**
 
-`Config` 構造体と `Load()` を定義します。`PORT`、`DATABASE_URL`、`DB_MAX_CONNS` を環境変数から読み、DB 接続 URL の必須チェックと最大接続数の正数チェックを行います。ヘッダー読み取りの期限は 5 秒、終了待ち時間は 10 秒で、現状はコード内の固定値です。
+`Config` 構造体と `Load()` を定義します。`PORT`、`DATABASE_URL`、`REDIS_URL`、`DB_MAX_CONNS` を環境変数から読み、DB・Redis 接続 URL の必須チェックと最大接続数の正数チェックを行います。ヘッダー読み取りの期限は 5 秒、終了待ち時間は 10 秒で、現状はコード内の固定値です。
 
 設定項目を増やすときは、このファイルにフィールド・読み込み・検証を追加します。ここでは `.env` を開きません。ローカル用ファイルの読み込みは Makefile と Compose が担当し、Go のコードは渡された環境変数だけを参照します。
 
 **[internal/config/config_test.go](internal/config/config_test.go)**
 
-`DATABASE_URL` が空のとき、`Load()` がエラーになることを確認するテストです。設定値の検証を追加したら、その正常値・異常値のテストもここに追加します。現在はこの一つのケースだけを確認しています。
+`DATABASE_URL` または `REDIS_URL` が空のときのエラーと、両方の接続先が設定に反映されることを確認します。設定値の検証を追加したら、その正常値・異常値のテストもここに追加します。
 
 **[internal/database/database.go](internal/database/database.go)**
 
@@ -288,7 +327,7 @@ POST /api/v1/tasks
 
 **[internal/app/app.go](internal/app/app.go)**
 
-`Router()` と `Run()` を定義します。`Router()` はリクエスト ID、panic の回復、30 秒の処理期限、HTTP ステータス付きのアクセスログを設定し、ヘルスチェックとタスク API のルートを登録します。`/health` はプロセスの応答、`/ready` は 2 秒の期限で DB 接続を確認します。30 秒の期限は context による通知で、処理を強制的に停止するものではありません。
+`Router()` と `Run()` を定義します。`Router()` はリクエスト ID、panic の回復、30 秒の処理期限、HTTP ステータス付きのアクセスログを設定し、ヘルスチェックとタスク API のルートを登録します。`/health` はプロセスの応答、`/ready` は合計 2 秒の期限で DB と Redis の接続を確認します。30 秒の期限は context による通知で、処理を強制的に停止するものではありません。
 
 `Run()` は HTTP サーバーを起動し、終了通知を受けたら `Shutdown()` で処理中のリクエストの完了を待ちます。待機期限を超えた場合などは `Close()` を呼びます。新しいリソースの登録、認証などの共通処理の追加、HTTP サーバー設定の変更を行う場所です。
 
@@ -343,7 +382,7 @@ HTTP リクエストを受け取り、リポジトリを呼び出してレスポ
 
 **[go.mod](go.mod)**
 
-Go のモジュール名、必要な Go のバージョン、依存ライブラリを宣言します。現在の主な依存は chi と pgx です。プロジェクト名や依存関係を変えるときに更新します。
+Go のモジュール名、必要な Go のバージョン、依存ライブラリを宣言します。現在の主な依存は chi、pgx、go-redis です。プロジェクト名や依存関係を変えるときに更新します。
 
 `go mod tidy` で生成される `go.sum` は、依存モジュールの検証に使うチェックサムを記録します。こちらも Git に含めます。
 
@@ -355,7 +394,7 @@ Go のモジュール名、必要な Go のバージョン、依存ライブラ�
 
 **[compose.yaml](compose.yaml)**
 
-ローカル用の PostgreSQL とマイグレーション用コンテナを定義します。DB データは `pgdata` ボリュームに保存します。マイグレーションは `tools` プロファイルで起動し、DB のヘルスチェック成功を待ちます。API は `make dev` でホスト上に起動します。
+ローカル用の PostgreSQL・Redis とマイグレーション用コンテナを定義します。DB データは `pgdata` ボリュームに保存します。マイグレーションは `tools` プロファイルで起動し、DB のヘルスチェック成功を待ちます。API は `make dev` でホスト上に起動します。
 
 ポート、ローカル DB、開発用コンテナの設定を変更するときに編集します。ここに書いた環境変数はローカルのコンテナ向けで、本番イメージや Cloud Run に自動では引き継がれません。
 

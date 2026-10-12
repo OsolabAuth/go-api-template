@@ -63,7 +63,7 @@ func TestTaskAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	router := Router(pool, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	router := Router(pool, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	request := func(method, path, body string, wantStatus int, result any) {
 		t.Helper()
 		req := httptest.NewRequest(method, path, strings.NewReader(body)).WithContext(ctx)
