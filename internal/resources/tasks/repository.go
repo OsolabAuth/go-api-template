@@ -12,8 +12,8 @@ var ErrNotFound = errors.New("task not found")
 type Repository struct{ db *pgxpool.Pool }
 
 func NewRepository(db *pgxpool.Pool) *Repository { return &Repository{db: db} }
-func (r *Repository) List(ctx context.Context) ([]Task, error) {
-	rows, err := r.db.Query(ctx, `SELECT id, title, done, created_at FROM tasks ORDER BY id LIMIT 100`)
+func (r *Repository) List(ctx context.Context, afterID int64, limit int) ([]Task, error) {
+	rows, err := r.db.Query(ctx, `SELECT id, title, done, created_at FROM tasks WHERE id > $1 ORDER BY id ASC LIMIT $2`, afterID, limit)
 	if err != nil {
 		return nil, err
 	}

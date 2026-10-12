@@ -111,4 +111,49 @@ func TestTaskAPI(t *testing.T) {
 
 	request(http.MethodDelete, path, "", http.StatusNoContent, nil)
 	request(http.MethodGet, path, "", http.StatusNotFound, nil)
+
+	var seeded []tasks.Task
+	for i := 0; i < 5; i++ {
+		var task tasks.Task
+		request(http.MethodPost, "/api/v1/tasks/", fmt.Sprintf(`{"title":"Page task %d"}`, i), http.StatusCreated, &task)
+		seeded = append(seeded, task)
+	}
+
+	// Each page starts strictly after the last ID of the previous page.
+	var afterID int64
+	for offset := 0; offset < len(seeded); offset += 2 {
+		pagePath := fmt.Sprintf("/api/v1/tasks/?limit=2&after_id=%d", afterID)
+		request(http.MethodGet, pagePath, "", http.StatusOK, &list)
+		wantCount := min(2, len(seeded)-offset)
+		if len(list) != wantCount {
+			t.Fatalf("page at offset %d = %+v, want %d tasks", offset, list, wantCount)
+		}
+		for i, task := range list {
+			if task.ID != seeded[offset+i].ID {
+				t.Fatalf("page at offset %d: ID = %d, want %d", offset, task.ID, seeded[offset+i].ID)
+			}
+		}
+		afterID = list[len(list)-1].ID
+	}
+	request(http.MethodGet, fmt.Sprintf("/api/v1/tasks/?limit=2&after_id=%d", afterID), "", http.StatusOK, &list)
+	if list == nil || len(list) != 0 {
+		t.Fatalf("final page = %+v, want an empty JSON array", list)
+	}
+
+	// A cursor remains usable even when the task with that ID is deleted.
+	cursorID := seeded[1].ID
+	request(http.MethodDelete, fmt.Sprintf("/api/v1/tasks/%d", cursorID), "", http.StatusNoContent, nil)
+	request(http.MethodGet, fmt.Sprintf("/api/v1/tasks/?limit=2&after_id=%d", cursorID), "", http.StatusOK, &list)
+	if len(list) != 2 || list[0].ID != seeded[2].ID || list[1].ID != seeded[3].ID {
+		t.Fatalf("page after deleted cursor = %+v, want the next two tasks", list)
+	}
+
+	request(http.MethodGet, "/api/v1/tasks/?limit=1&after_id=0", "", http.StatusOK, &list)
+	if len(list) != 1 || list[0].ID != seeded[0].ID {
+		t.Fatalf("first page with limit=1 = %+v, want the first task", list)
+	}
+	request(http.MethodGet, "/api/v1/tasks/?limit=100&after_id=9223372036854775807", "", http.StatusOK, &list)
+	if list == nil || len(list) != 0 {
+		t.Fatalf("page after maximum ID = %+v, want an empty JSON array", list)
+	}
 }

@@ -65,3 +65,30 @@ func TestCreateTitleCharacterLimit(t *testing.T) {
 		})
 	}
 }
+
+func TestListRejectsInvalidPagination(t *testing.T) {
+	// Invalid input must be rejected before the repository is used.
+	handler := NewHandler(nil, slog.Default()).Routes()
+	for _, query := range []string{
+		"limit", "limit=", "limit=0", "limit=-1", "limit=101",
+		"limit=9223372036854775808", "limit=1.5", "limit=two", "limit=%201",
+		"limit=1&limit=2",
+		"after_id", "after_id=", "after_id=-1", "after_id=9223372036854775808",
+		"after_id=1.5", "after_id=two", "after_id=%201", "after_id=0&after_id=1",
+		"limit=%zz", "after_id=0;limit=2",
+	} {
+		t.Run(query, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/?"+query, nil))
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body = %s", response.Code, response.Body.String())
+			}
+			var payload struct {
+				Error string `json:"error"`
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil || payload.Error == "" {
+				t.Fatalf("expected a JSON error, got %s; decode error = %v", response.Body.String(), err)
+			}
+		})
+	}
+}
