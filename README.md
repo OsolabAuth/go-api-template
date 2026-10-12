@@ -1,6 +1,6 @@
 # Go API テンプレートの使い方
 
-Go と PostgreSQL で API サーバーを作るためのテンプレートです。HTTP ルーティングに chi、DB 接続に pgxpool、ログに標準ライブラリの slog を使います。ORM は使わず、サンプルとしてタスクの作成・一覧・取得・削除 API を実装しています。
+Go と PostgreSQL で API サーバーを作るためのテンプレートです。HTTP ルーティングに chi、DB 接続に pgxpool、ログに標準ライブラリの slog を使います。ORM は使わず、サンプルとしてタスクとメモ（notes）の作成・一覧・取得・削除 API を実装しています。
 
 ローカルでは `.env` を使い、本番では実行環境から環境変数を渡します。Docker イメージのビルドに `.env` や DB 接続情報は不要です。
 
@@ -115,7 +115,7 @@ make test
 通常のテストは DB なしで実行できます。HTTP 経由の CRUD を PostgreSQL と合わせて確認する場合は、テスト用 DB の接続先を指定します。
 
 ```sh
-TEST_DATABASE_URL='postgres://app:app_dev_password@localhost:5432/appdb?sslmode=disable' go test ./internal/app -run '^TestTaskAPI$' -v
+TEST_DATABASE_URL='postgres://app:app_dev_password@localhost:5432/appdb?sslmode=disable' go test ./internal/app -run '^Test(Task|Note)API$' -v
 ```
 
 この統合テストは専用の一時スキーマにマイグレーションを適用し、終了時にそのスキーマだけを削除します。既存のテーブルやデータは変更しません。接続ユーザーにはスキーマ作成権限が必要です。`TEST_DATABASE_URL` が未指定の場合、このテストだけスキップします。
@@ -215,12 +215,61 @@ make test
 | `internal/config` | 環境変数の読み込み |
 | `internal/database` | DB 接続プール |
 | `internal/common/json.go` | JSON の読み書きとエラーレスポンス |
-| `internal/resources/tasks` | サンプルのモデル・ハンドラー・SQL |
+| `internal/resources/tasks` | タスクのモデル・ハンドラー・SQL |
+| `internal/resources/notes` | 追加リソースのメモのモデル・ハンドラー・SQL |
 | `migrations` | DB スキーマの変更 |
 
 リソースを追加するときは `internal/resources/<リソース名>` に実装し、`internal/app/app.go` にルートを登録します。業務ロジックが増えた段階で `service.go` を追加してください。
 
 新しい DB で使い始める前ならサンプルのマイグレーションを置き換えられます。運用開始後は適用済みのファイルを編集せず、新しい番号のマイグレーションを追加してください。API はマイグレーションを自動実行しません。
+
+## 新しいリソースを追加する差分
+
+`example/notes-resource` は、修正済みの `main` からメモ（notes）を追加した例です。既存のタスクを残しながら、新しい URL とテーブルを持つリソースを追加しています。
+
+```sh
+git log --oneline main..example/notes-resource
+git diff main...example/notes-resource
+```
+
+差分は次の順に読むと、何を追加・変更するかが分かります。
+
+| ファイル | 役割と変更内容 |
+| --- | --- |
+| `migrations/000002_create_notes.up.sql` / `.down.sql` | notes テーブルの作成と削除。適用済みの tasks のマイグレーションは変更しない |
+| `internal/resources/notes/model.go` | メモの出力と作成リクエストの型を定義する |
+| `internal/resources/notes/repository.go` | メモの保存・一覧・取得・削除の SQL を書く |
+| `internal/resources/notes/handler.go` | JSON と ID の検証、ルート、HTTP レスポンスを定義する |
+| `internal/app/app.go` | notes を import し、`/api/v1/notes` にルートを登録する |
+| `internal/resources/notes/handler_test.go` | 入力の境界値、不正な JSON・ID、内部エラーをテストする |
+| `internal/app/notes_integration_test.go` | 実 DB での入出力、既存タスクとの共存、マイグレーションの巻き戻しと再適用をテストする |
+| `README.md` | 利用方法と差分の説明を追加する |
+
+共通の DB 接続、設定読み込み、JSON 処理は既存のものを使います。リソース追加用の共通インターフェースや自動登録の仕組みは増やしていません。
+
+### メモ API を試す
+
+ブランチを切り替えたら、API 起動前に `make migrate-up` を実行します。
+
+```sh
+# メモを作成（201）
+curl -i -X POST http://localhost:8080/api/v1/notes \
+  -H 'Content-Type: application/json' \
+  -d '{"content":"新しいリソースを追加する例"}'
+
+# メモ一覧（200）
+curl -i http://localhost:8080/api/v1/notes
+
+NOTE_ID=1 # 作成レスポンスの id に置き換える
+
+# 1 件取得（200）
+curl -i "http://localhost:8080/api/v1/notes/$NOTE_ID"
+
+# 削除（204）
+curl -i -X DELETE "http://localhost:8080/api/v1/notes/$NOTE_ID"
+```
+
+`content` は前後の空白を除いた後、Unicode コードポイント単位で 1〜2000 文字です。作成・取得のレスポンスは `id`・`content`・`created_at` を持ちます。一覧は ID 昇順の最大 100 件で、空の場合は `[]` を返します。入力不正は `400`、取得・削除の対象がない場合は `404` です。
 
 ## コマンド一覧
 
@@ -228,7 +277,7 @@ make test
 | --- | --- |
 | `make db-up` | ローカル PostgreSQL の起動 |
 | `make migrate-up` | 未適用のローカル DB マイグレーションを適用 |
-| `make migrate-down` | ローカル DB のマイグレーションを一つ戻す。サンプルでは tasks テーブルとデータが削除される |
+| `make migrate-down` | ローカル DB のマイグレーションを一つ戻す。このブランチの最新マイグレーションでは notes テーブルとデータが削除される |
 | `make dev` | `.env` を読み込んでホスト上で API を起動 |
 | `make test` | Go のテストを実行 |
 | `make build` | 本番用 Docker イメージを作成 |
