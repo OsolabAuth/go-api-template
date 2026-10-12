@@ -222,6 +222,29 @@ make test
 
 新しい DB で使い始める前ならサンプルのマイグレーションを置き換えられます。運用開始後は適用済みのファイルを編集せず、新しい番号のマイグレーションを追加してください。API はマイグレーションを自動実行しません。
 
+## 共通 HTTP 処理を追加する例
+
+`example/request-id-header` は、全ルートのレスポンスに `X-Request-ID` を付ける例です。利用者がレスポンスから得た ID と、サーバーのアクセスログ・JSON エラーにある `request_id` を対応づけられます。
+
+```sh
+# ID を省略するとサーバーが生成し、レスポンスヘッダーに返す
+curl -i http://localhost:8080/health
+
+# クライアントの ID を引き継ぐ。400 の JSON エラーとログにも同じ ID が入る
+curl -i -H 'X-Request-ID: example-request-123' http://localhost:8080/api/v1/tasks/0
+
+# この共通処理だけの差分を見る
+git diff main...example/request-id-header
+```
+
+| ファイル | 変更内容 |
+| --- | --- |
+| `internal/app/app.go` | 既存の共通ミドルウェアに、レスポンスヘッダーの設定を1行追加 |
+| `internal/app/request_id_test.go` | 生成・引き継ぎ、200・400・404・panic 時の500、ログと JSON エラーとの ID 一致を確認 |
+| `README.md` | 利用例と差分の読み方を追加 |
+
+リクエスト ID の生成には既存の chi ミドルウェアを使います。この変更は全ルートに適用され、各リソースのハンドラーを編集する必要はありません。
+
 ## コマンド一覧
 
 | コマンド | 内容 |

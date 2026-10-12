@@ -21,6 +21,7 @@ func Router(db *pgxpool.Pool, logger *slog.Logger) http.Handler {
 	r.Use(middleware.RequestID)
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			w.Header().Set(middleware.RequestIDHeader, middleware.GetReqID(req.Context()))
 			start := time.Now()
 			response := middleware.NewWrapResponseWriter(w, req.ProtoMajor)
 			defer func() {
