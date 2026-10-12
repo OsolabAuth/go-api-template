@@ -41,6 +41,14 @@ func (r *Repository) Get(ctx context.Context, id int64) (Task, error) {
 	}
 	return t, err
 }
+func (r *Repository) Update(ctx context.Context, id int64, done bool) (Task, error) {
+	var t Task
+	err := r.db.QueryRow(ctx, `UPDATE tasks SET done=$2 WHERE id=$1 RETURNING id, title, done, created_at`, id, done).Scan(&t.ID, &t.Title, &t.Done, &t.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Task{}, ErrNotFound
+	}
+	return t, err
+}
 func (r *Repository) Delete(ctx context.Context, id int64) error {
 	command, err := r.db.Exec(ctx, `DELETE FROM tasks WHERE id=$1`, id)
 	if err != nil {

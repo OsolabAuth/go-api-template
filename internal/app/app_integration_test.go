@@ -109,6 +109,25 @@ func TestTaskAPI(t *testing.T) {
 		t.Fatalf("list = %+v, want only the created task", list)
 	}
 
+	for _, done := range []bool{true, false} {
+		var updated tasks.Task
+		request(http.MethodPatch, path, fmt.Sprintf(`{"done":%t}`, done), http.StatusOK, &updated)
+		if updated.ID != created.ID || updated.Title != title || updated.Done != done || !updated.CreatedAt.Equal(created.CreatedAt) {
+			t.Fatalf("updated task = %+v, want done=%t with other fields unchanged", updated, done)
+		}
+
+		fetched = tasks.Task{}
+		request(http.MethodGet, path, "", http.StatusOK, &fetched)
+		if fetched.ID != created.ID || fetched.Done != done {
+			t.Fatalf("fetched task = %+v, want done=%t", fetched, done)
+		}
+		request(http.MethodGet, "/api/v1/tasks/", "", http.StatusOK, &list)
+		if len(list) != 1 || list[0].ID != created.ID || list[0].Done != done {
+			t.Fatalf("list = %+v, want the task with done=%t", list, done)
+		}
+	}
+
 	request(http.MethodDelete, path, "", http.StatusNoContent, nil)
 	request(http.MethodGet, path, "", http.StatusNotFound, nil)
+	request(http.MethodPatch, path, `{"done":true}`, http.StatusNotFound, nil)
 }
