@@ -1,4 +1,4 @@
-.PHONY: db-up dev migrate-up migrate-down test build deploy
+.PHONY: db-up dev migrate-up migrate-down test coverage build deploy
 
 db-up:
 	docker compose up -d db
@@ -14,6 +14,14 @@ migrate-down:
 
 test:
 	go test ./...
+
+coverage:
+	mkdir -p coverage
+	rm -f coverage/coverage.out coverage/summary.txt coverage/index.html
+	go test -count=1 -coverpkg=./... -covermode=atomic -coverprofile=coverage/coverage.out ./...
+	go tool cover -func=coverage/coverage.out > coverage/summary.txt
+	cat coverage/summary.txt
+	go tool cover -html=coverage/coverage.out -o coverage/index.html
 
 build:
 	docker build -f docker/Dockerfile.prod -t go-api-template:local .

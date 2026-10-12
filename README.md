@@ -106,7 +106,19 @@ curl -i -X DELETE "http://localhost:8080/api/v1/tasks/$TASK_ID"
 
 削除成功時は `204` で、レスポンス本文はありません。存在しない ID は `404` になります。更新 API はサンプルに含まれていません。
 
-## 5 テストと終了
+## 5 テスト・カバレッジと終了
+
+### テストの配置
+
+同じ Go モジュール内の `*_test.go` にテストを置きます。標準の `testing` と `httptest` を使い、`go test ./...` でまとめて実行できます。テスト用ファイルは API の通常ビルドには含まれません。
+
+| ファイル | 確認する内容 |
+| --- | --- |
+| `internal/common/json_test.go` | JSON レスポンス、request ID、不正な入力、未知フィールド、本文サイズの上限 |
+| `internal/config/config_test.go` | 必須設定、既定値、環境変数による上書き、接続数の境界値 |
+| `internal/resources/tasks/handler_test.go` | タイトルの文字数制限と内部エラーの扱い |
+| `internal/app/app_test.go` | HTTP ステータスとアクセスログ、panic 時の応答 |
+| `internal/app/app_integration_test.go` | HTTP 経由のタスク作成・一覧・取得・削除と PostgreSQL への保存 |
 
 ```sh
 make test
@@ -119,6 +131,39 @@ TEST_DATABASE_URL='postgres://app:app_dev_password@localhost:5432/appdb?sslmode=
 ```
 
 この統合テストは専用の一時スキーマにマイグレーションを適用し、終了時にそのスキーマだけを削除します。既存のテーブルやデータは変更しません。接続ユーザーにはスキーマ作成権限が必要です。`TEST_DATABASE_URL` が未指定の場合、このテストだけスキップします。
+
+### ローカルでカバレッジを見る
+
+```sh
+# DB なし: 単体テストによるカバレッジ
+make coverage
+
+# テスト用 DB を起動した状態で、統合テストも含めて計測
+TEST_DATABASE_URL='postgres://app:app_dev_password@localhost:5432/appdb?sslmode=disable' make coverage
+```
+
+`make coverage` は `.env` を読み込みません。統合テストを含めるときは `TEST_DATABASE_URL` を明示してください。
+
+- ターミナルと `coverage/summary.txt` に関数ごとの割合と全体の `total` を表示します。
+- `coverage/index.html` をブラウザで開くと、ファイルを選んで実行済み・未実行のコードを色分けして確認できます。
+- `coverage/coverage.out` は Go 標準形式の生データです。生成物は Git と Docker のビルド対象から除外します。
+
+内部では `go test -coverpkg=./... -coverprofile=...` と [Go 標準のカバレッジツール](https://go.dev/doc/build-cover)を使います。全パッケージを計測対象にするため、HTTP の統合テストから呼ばれたリポジトリや共通処理も結果に反映されます。起動処理などの未実行コードも分母に含めます。DB なしの結果と統合テストを含む結果では割合が変わります。
+
+カバレッジは実行された文の割合です。まずは未確認の処理を探すために使い、合格の最低割合は設定していません。
+
+### PR でカバレッジを見る
+
+[`.github/workflows/test.yml`](.github/workflows/test.yml) は PR の作成・更新と `main` への push で実行されます。
+
+1. CI 専用の PostgreSQL を起動します。本番の接続情報やシークレットは不要です。
+2. `go vet`、統合テストを含む `make coverage`、API の Go ビルドを実行します。
+3. Actions の実行ページの **Summary** に関数ごとの割合と全体の `total` を表示します。
+4. 同じページの **Artifacts → coverage-report** をダウンロードし、展開した `index.html` をブラウザで開きます。レポートの保存期間は14日です。
+
+PR の Checks から、このワークフローの実行ページに移動できます。テストが失敗するとチェックも失敗し、その実行のレポートは公開しません。
+
+### 終了する
 
 API は実行中のターミナルで `Ctrl+C` を押して終了します。DB などの Compose コンテナを停止・削除する場合は、次を実行します。DB データのボリュームは残ります。
 
@@ -148,7 +193,7 @@ docker build -f docker/Dockerfile.prod -t go-api-template:local .
 
 ## 7 本番環境へリリースする
 
-GitHub Actions を追加するときは、次の順序にします。ワークフロー自体はこのテンプレートにまだ含まれていません。
+テストとカバレッジの GitHub Actions は用意されています。デプロイ用のワークフローを追加するときは、次の順序にします。
 
 1. テストを実行する。
 2. `docker/Dockerfile.prod` を指定してイメージをビルドする。
@@ -222,6 +267,20 @@ make test
 
 新しい DB で使い始める前ならサンプルのマイグレーションを置き換えられます。運用開始後は適用済みのファイルを編集せず、新しい番号のマイグレーションを追加してください。API はマイグレーションを自動実行しません。
 
+## テストと CI を追加する差分の読み方
+
+`example/test-coverage` は `main` を起点にした独立した開発サンプルです。
+
+```sh
+git diff main...example/test-coverage
+```
+
+1. `internal/common/json_test.go` / `internal/config/config_test.go`：入力や設定の契約をテストする。
+2. `Makefile`：既存の単体・統合テストをまとめて計測し、テキストと HTML にする。
+3. `.github/workflows/test.yml`：テスト用 DB を用意し、同じコマンドを CI で実行してレポートを保存する。
+4. `.gitignore` / `.dockerignore`：生成物を除外する。
+5. `README.md`：ローカルと PR での確認手順を共有する。
+
 ## コマンド一覧
 
 | コマンド | 内容 |
@@ -231,6 +290,7 @@ make test
 | `make migrate-down` | ローカル DB のマイグレーションを一つ戻す。サンプルでは tasks テーブルとデータが削除される |
 | `make dev` | `.env` を読み込んでホスト上で API を起動 |
 | `make test` | Go のテストを実行 |
+| `make coverage` | テストと全パッケージのカバレッジ計測、HTML レポート生成 |
 | `make build` | 本番用 Docker イメージを作成 |
 | `make deploy` | イメージのビルド・push と Cloud Run へのデプロイ |
 
@@ -278,7 +338,7 @@ POST /api/v1/tasks
 
 **[internal/config/config_test.go](internal/config/config_test.go)**
 
-`DATABASE_URL` が空のとき、`Load()` がエラーになることを確認するテストです。設定値の検証を追加したら、その正常値・異常値のテストもここに追加します。現在はこの一つのケースだけを確認しています。
+必須の `DATABASE_URL`、既定値、環境変数による上書き、`DB_MAX_CONNS` の境界値と不正な値を確認します。設定値の検証を追加したら、その正常値・異常値のテストもここに追加します。
 
 **[internal/database/database.go](internal/database/database.go)**
 

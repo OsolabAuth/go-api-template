@@ -3,3 +3,4 @@
 !.env.example
 tmp/
 .DS_Store
+coverage/
