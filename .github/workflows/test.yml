@@ -1,0 +1,63 @@
+name: Test and coverage
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app_test_password
+          POSTGRES_DB: app_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U app -d app_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgres://app:app_test_password@localhost:5432/app_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Vet
+        run: go vet ./...
+      - name: Test with coverage
+        run: make coverage
+      - name: Show coverage summary
+        run: |
+          {
+            echo '## Go coverage'
+            echo 'PostgreSQL の統合テストを含むカバレッジです。'
+            echo '```text'
+            cat coverage/summary.txt
+            echo '```'
+            echo '行ごとの結果は coverage-report をダウンロードし、index.html をブラウザで開いて確認できます。'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-report
+          path: coverage/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Build API
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+        run: go build -mod=readonly -trimpath -ldflags='-s -w' -o "$RUNNER_TEMP/api" ./cmd/api
