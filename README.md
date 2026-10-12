@@ -106,13 +106,35 @@ curl -i -X DELETE "http://localhost:8080/api/v1/tasks/$TASK_ID"
 
 削除成功時は `204` で、レスポンス本文はありません。存在しない ID は `404` になります。更新 API はサンプルに含まれていません。
 
+### タスク一覧の続きを取得する
+
+このブランチでは、既存の一覧 API に `limit` と `after_id` を追加しています。返す JSON は従来どおりタスクの配列です。
+
+```sh
+# 最初の 2 件を取得（id の昇順）
+curl -i 'http://localhost:8080/api/v1/tasks?limit=2'
+
+# 直前の配列の最後の id に置き換えて、続きの 2 件を取得
+AFTER_ID=2
+curl -i "http://localhost:8080/api/v1/tasks?limit=2&after_id=$AFTER_ID"
+```
+
+| クエリ | 省略時 | 指定できる値 |
+| --- | --- | --- |
+| `limit` | `100` | `1`〜`100` の整数 |
+| `after_id` | `0` | `0`〜`9223372036854775807` の整数 |
+
+`after_id` より大きい ID を最大 `limit` 件返します。`after_id` のタスクが削除されても続きを取得でき、続きがなければ `200` と空配列 `[]` を返します。クエリを付けなければ、従来どおり先頭から最大 100 件です。
+
+空の指定（`?limit=` や `?after_id`）、範囲外、整数以外、同じキーの複数指定、不正な URL エンコードは `400` です。総件数や次ページ用の専用フィールドは追加せず、最後の ID を呼び出し側で保持します。ページの取得中に追加・削除されたデータはその時点の状態で返すため、全ページを固定したスナップショットではありません。
+
 ## 5 テストと終了
 
 ```sh
 make test
 ```
 
-通常のテストは DB なしで実行できます。HTTP 経由の CRUD を PostgreSQL と合わせて確認する場合は、テスト用 DB の接続先を指定します。
+通常のテストは DB なしで実行できます。HTTP 経由の CRUD とページングを PostgreSQL と合わせて確認する場合は、テスト用 DB の接続先を指定します。
 
 ```sh
 TEST_DATABASE_URL='postgres://app:app_dev_password@localhost:5432/appdb?sslmode=disable' go test ./internal/app -run '^TestTaskAPI$' -v
@@ -222,6 +244,20 @@ make test
 
 新しい DB で使い始める前ならサンプルのマイグレーションを置き換えられます。運用開始後は適用済みのファイルを編集せず、新しい番号のマイグレーションを追加してください。API はマイグレーションを自動実行しません。
 
+## このブランチの差分を読む
+
+`example/task-pagination` は、`main` の既存 API にクエリを追加する開発例です。DB のスキーマや依存パッケージの変更はありません。差分は次の順に読むと、HTTP の入力から SQL まで追えます。
+
+1. `internal/resources/tasks/handler.go`：クエリの省略値・入力検証を追加し、値をリポジトリに渡す。
+2. `internal/resources/tasks/repository.go`：`List` の引数を増やし、SQL に取得位置と件数を渡す。
+3. `internal/resources/tasks/handler_test.go`：DB を使わず、空指定・範囲外・重複などを拒否することを確認する。
+4. `internal/app/app_integration_test.go`：実 DB で連続ページ、空の終端、削除済み ID からの再開を確認する。
+5. `README.md`：呼び出し方と境界条件を更新する。
+
+```sh
+git diff main...example/task-pagination
+```
+
 ## コマンド一覧
 
 | コマンド | 内容 |
@@ -327,7 +363,7 @@ HTTP リクエストを受け取り、リポジトリを呼び出してレスポ
 
 `List()`、`Create()`、`Get()`、`Delete()` で SQL を実行します。入力値は `$1` などのパラメーターとして渡し、結果を `Scan()` で `Task` に読み込みます。取得・削除の対象がない場合は `ErrNotFound` を返し、ハンドラーがそれを `404` に変換します。
 
-一覧は ID 昇順で最大 100 件です。次のページを取得する機能はまだありません。検索条件、並び順、ページング、保存する項目を変更するときに編集します。
+一覧の `List(ctx, afterID, limit)` は、`WHERE id > $1 ORDER BY id ASC LIMIT $2` によって指定 ID より後のタスクを返します。`afterID` と `limit` はハンドラーが検証した値を渡します。検索条件、並び順、ページング、保存する項目を変更するときに編集します。
 
 ### DB スキーマ
 

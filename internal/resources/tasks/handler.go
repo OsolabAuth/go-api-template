@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -30,7 +31,36 @@ func (h *Handler) Routes() http.Handler {
 	return r
 }
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
-	data, err := h.repo.List(r.Context())
+	query, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		common.Error(w, r, http.StatusBadRequest, "invalid query string")
+		return
+	}
+	var afterID int64
+	if values, present := query["after_id"]; present {
+		if len(values) != 1 {
+			common.Error(w, r, http.StatusBadRequest, "after_id must be a single non-negative integer")
+			return
+		}
+		afterID, err = strconv.ParseInt(values[0], 10, 64)
+		if err != nil || afterID < 0 {
+			common.Error(w, r, http.StatusBadRequest, "after_id must be a single non-negative integer")
+			return
+		}
+	}
+	limit := 100
+	if values, present := query["limit"]; present {
+		if len(values) != 1 {
+			common.Error(w, r, http.StatusBadRequest, "limit must be a single integer between 1 and 100")
+			return
+		}
+		limit, err = strconv.Atoi(values[0])
+		if err != nil || limit < 1 || limit > 100 {
+			common.Error(w, r, http.StatusBadRequest, "limit must be a single integer between 1 and 100")
+			return
+		}
+	}
+	data, err := h.repo.List(r.Context(), afterID, limit)
 	if err != nil {
 		h.internalError(w, r, err)
 		return
