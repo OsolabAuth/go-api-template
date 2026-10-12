@@ -10,6 +10,7 @@ import (
 
 	"example.com/go-api-template/internal/common"
 	"example.com/go-api-template/internal/config"
+	"example.com/go-api-template/internal/resources/notes"
 	"example.com/go-api-template/internal/resources/tasks"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -46,6 +47,7 @@ func Router(db *pgxpool.Pool, logger *slog.Logger) http.Handler {
 		common.JSON(w, 200, map[string]string{"status": "ready"})
 	})
 	r.Mount("/api/v1/tasks", tasks.NewHandler(tasks.NewRepository(db), logger).Routes())
+	r.Mount("/api/v1/notes", notes.NewHandler(notes.NewRepository(db), logger).Routes())
 	return r
 }
 func Run(ctx context.Context, cfg config.Config, db *pgxpool.Pool, logger *slog.Logger) error {
