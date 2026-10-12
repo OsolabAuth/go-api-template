@@ -1,6 +1,6 @@
 # Go API テンプレートの使い方
 
-Go と PostgreSQL で API サーバーを作るためのテンプレートです。HTTP ルーティングに chi、DB 接続に pgxpool、ログに標準ライブラリの slog を使います。ORM は使わず、サンプルとしてタスクの作成・一覧・取得・削除 API を実装しています。
+Go と PostgreSQL で API サーバーを作るためのテンプレートです。HTTP ルーティングに chi、DB 接続に pgxpool、ログに標準ライブラリの slog を使います。ORM は使わず、サンプルとしてタスクの作成・一覧・取得・完了状態の更新・削除 API を実装しています。
 
 ローカルでは `.env` を使い、本番では実行環境から環境変数を渡します。Docker イメージのビルドに `.env` や DB 接続情報は不要です。
 
@@ -100,11 +100,16 @@ TASK_ID=1 # 実際に返された id に置き換える
 # 1 件取得
 curl -i "http://localhost:8080/api/v1/tasks/$TASK_ID"
 
+# 完了にする（未完了に戻すときは false）
+curl -i -X PATCH "http://localhost:8080/api/v1/tasks/$TASK_ID" \
+  -H 'Content-Type: application/json' \
+  -d '{"done":true}'
+
 # 削除
 curl -i -X DELETE "http://localhost:8080/api/v1/tasks/$TASK_ID"
 ```
 
-削除成功時は `204` で、レスポンス本文はありません。存在しない ID は `404` になります。更新 API はサンプルに含まれていません。
+削除成功時は `204` で、レスポンス本文はありません。存在しない ID は `404` になります。更新は `PATCH /api/v1/tasks/{id}` に `{"done":true}` または `{"done":false}` を送り、成功時は更新後のタスクを `200` で返します。`done` の省略・`null`・真偽値以外の値は `400` です。
 
 ## 5 テストと終了
 
@@ -222,6 +227,28 @@ make test
 
 新しい DB で使い始める前ならサンプルのマイグレーションを置き換えられます。運用開始後は適用済みのファイルを編集せず、新しい番号のマイグレーションを追加してください。API はマイグレーションを自動実行しません。
 
+## 機能追加の差分を読む
+
+`example/task-completion` ブランチには、ベースの修正とは別のコミットで「タスクの完了状態を更新する API」を追加しています。`main` は修正済みのベースです。
+
+```sh
+git log --oneline main..example/task-completion
+git diff main...example/task-completion
+```
+
+変更は、入力の定義 → HTTP 処理 → SQL → テスト → 利用手順の順で読むと追いやすくなります。
+
+| ファイル | この機能で追加したもの |
+| --- | --- |
+| `internal/resources/tasks/model.go` | `done` を受け取る `UpdateTask` |
+| `internal/resources/tasks/handler.go` | PATCH ルート、ID・JSON・必須項目の検証、200・400・404・500 の返し分け |
+| `internal/resources/tasks/repository.go` | `done` の UPDATE と更新後のタスク取得 |
+| `internal/resources/tasks/update_test.go` | 不正な入力の拒否と、`false` を省略と区別するテスト |
+| `internal/app/app_integration_test.go` | 完了・未完了への更新、保存結果の取得、存在しない ID のテスト |
+| `README.md` | curl の実行例と、この差分の説明 |
+
+今回は既存の `done` カラムを使うため、DB 接続設定やマイグレーションは変更していません。カラムを追加する機能なら、新しいマイグレーションも同じ機能のコミットに含めます。関係のない修正や整形は別コミットにすると、機能追加に必要な差分が読み取りやすくなります。
+
 ## コマンド一覧
 
 | コマンド | 内容 |
@@ -311,13 +338,13 @@ POST /api/v1/tasks
 
 **[internal/resources/tasks/model.go](internal/resources/tasks/model.go)**
 
-タスクを表す `Task` と、作成リクエストを表す `CreateTask` を定義します。`Task` は ID・タイトル・完了状態・作成日時を持ち、`json` タグで JSON のフィールド名を指定しています。入力用の `CreateTask` はタイトルだけを持ち、ID や作成日時は DB 側で決まります。
+タスクを表す `Task` と、作成リクエストを表す `CreateTask` を定義します。`Task` は ID・タイトル・完了状態・作成日時を持ち、`json` タグで JSON のフィールド名を指定しています。入力用の `CreateTask` はタイトルだけを持ち、ID や作成日時は DB 側で決まります。`UpdateTask` は完了状態の更新用です。`Done` を `*bool` にすることで、`false` の指定と項目の省略を区別します。
 
 API の入力・出力項目を追加するときに変更します。DB に保存する項目を増やす場合は、SQL とマイグレーションも合わせて変更します。
 
 **[internal/resources/tasks/handler.go](internal/resources/tasks/handler.go)**
 
-HTTP リクエストを受け取り、リポジトリを呼び出してレスポンスを返します。`Routes()` が一覧・作成・取得・削除のルートを定義し、`app.go` がその前に `/api/v1/tasks` を付けて登録します。`parseID()` は ID が正の整数かどうかを確認します。
+HTTP リクエストを受け取り、リポジトリを呼び出してレスポンスを返します。`Routes()` が一覧・作成・取得・更新・削除のルートを定義し、`app.go` がその前に `/api/v1/tasks` を付けて登録します。`parseID()` は ID が正の整数かどうかを確認します。
 
 作成時はタイトル前後の空白を除去し、空文字と長さ超過を拒否します。`utf8.RuneCountInString()` によって Unicode コードポイント単位で 1〜200 文字を受け付けます。JSON の解析失敗は `400`、対象がない場合は `404`、DB などの内部エラーは原因とリクエスト ID をログに記録し、クライアントには詳細を含めず `500` を返します。
 
@@ -325,7 +352,7 @@ HTTP リクエストを受け取り、リポジトリを呼び出してレスポ
 
 **[internal/resources/tasks/repository.go](internal/resources/tasks/repository.go)**
 
-`List()`、`Create()`、`Get()`、`Delete()` で SQL を実行します。入力値は `$1` などのパラメーターとして渡し、結果を `Scan()` で `Task` に読み込みます。取得・削除の対象がない場合は `ErrNotFound` を返し、ハンドラーがそれを `404` に変換します。
+`List()`、`Create()`、`Get()`、`Update()`、`Delete()` で SQL を実行します。入力値は `$1` などのパラメーターとして渡し、結果を `Scan()` で `Task` に読み込みます。取得・更新・削除の対象がない場合は `ErrNotFound` を返し、ハンドラーがそれを `404` に変換します。
 
 一覧は ID 昇順で最大 100 件です。次のページを取得する機能はまだありません。検索条件、並び順、ページング、保存する項目を変更するときに編集します。
 

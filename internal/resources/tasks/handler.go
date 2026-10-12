@@ -26,6 +26,7 @@ func (h *Handler) Routes() http.Handler {
 	r.Get("/", h.list)
 	r.Post("/", h.create)
 	r.Get("/{id}", h.get)
+	r.Patch("/{id}", h.update)
 	r.Delete("/{id}", h.delete)
 	return r
 }
@@ -62,6 +63,32 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	task, err := h.repo.Get(r.Context(), id)
+	if errors.Is(err, ErrNotFound) {
+		common.Error(w, r, 404, "task not found")
+		return
+	}
+	if err != nil {
+		h.internalError(w, r, err)
+		return
+	}
+	common.JSON(w, 200, task)
+}
+func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
+	id, ok := parseID(chi.URLParam(r, "id"))
+	if !ok {
+		common.Error(w, r, 400, "invalid task id")
+		return
+	}
+	var payload UpdateTask
+	if err := common.DecodeJSON(r, &payload); err != nil {
+		common.Error(w, r, 400, "invalid JSON body")
+		return
+	}
+	if payload.Done == nil {
+		common.Error(w, r, 400, "done must be provided as a boolean")
+		return
+	}
+	task, err := h.repo.Update(r.Context(), id, *payload.Done)
 	if errors.Is(err, ErrNotFound) {
 		common.Error(w, r, 404, "task not found")
 		return
