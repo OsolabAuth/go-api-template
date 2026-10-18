@@ -222,6 +222,75 @@ make test
 
 新しい DB で使い始める前ならサンプルのマイグレーションを置き換えられます。運用開始後は適用済みのファイルを編集せず、新しい番号のマイグレーションを追加してください。API はマイグレーションを自動実行しません。
 
+## 注文と明細を一緒に保存するサンプル
+
+`example/order-transaction` は、複数テーブルへの書き込みを一つのトランザクションにまとめる例です。`POST /api/v1/orders` で注文と明細を作り、`GET /api/v1/orders/{id}` で確認できます。価格・決済・在庫などの処理は含みません。
+
+このブランチで `make migrate-up` を実行すると、`000002_create_orders` が `orders` と `order_items` を追加します。API を起動し、次を実行してください。
+
+```sh
+curl -i -X POST http://localhost:8080/api/v1/orders \
+  -H 'Content-Type: application/json' \
+  -d '{"customer_name":"山田","items":[{"sku":"book","quantity":2},{"sku":"pen","quantity":1}]}'
+
+ORDER_ID=1 # 作成レスポンスの id に置き換える
+curl -i "http://localhost:8080/api/v1/orders/$ORDER_ID"
+```
+
+作成は `201`、取得は `200` を返し、レスポンスは次の形です。明細は入力順に返します。
+
+```json
+{
+  "id": 1,
+  "customer_name": "山田",
+  "items": [{"sku": "book", "quantity": 2}, {"sku": "pen", "quantity": 1}],
+  "created_at": "2026-01-01T00:00:00Z"
+}
+```
+
+| 入力 | 制約 |
+| --- | --- |
+| `customer_name` | 前後の空白を除去して 1〜200 文字 |
+| `items` | 1〜100 件 |
+| `items[].sku` | 前後の空白を除去して 1〜64 文字。同じ注文内で重複不可、大文字・小文字は区別 |
+| `items[].quantity` | 1〜1000 の整数 |
+
+文字数は Unicode コードポイント単位です。`customer_name` と `sku` には NUL 文字（JSON の `\u0000`）を含められません。入力不正は `400`、存在しない注文は `404`、同じ注文内の SKU 重複は `409`、DB などの内部エラーは詳細を隠して `500` を返します。JSON 本文は既存の共通処理で 1 MiB に制限します。
+
+次のリクエストは、注文と 1 件目の明細の保存後に、2 件目が `UNIQUE (order_id, sku)` 制約に違反します。結果は `409` で、作成途中の注文と明細は両方取り消されます。
+
+```sh
+curl -i -X POST http://localhost:8080/api/v1/orders \
+  -H 'Content-Type: application/json' \
+  -d '{"customer_name":"rollback","items":[{"sku":"book","quantity":1},{"sku":"book","quantity":2}]}'
+```
+
+`Repository.Create()` は `Begin()` → 注文の INSERT → 明細の INSERT → `Commit()` の順に処理します。すべての SQL を同じ `tx` で実行し、途中で失敗したら `defer` の `Rollback()` で取り消します。リクエストがキャンセルされた場合も後始末できるよう、Rollback には独立した 5 秒の期限を使います。Commit 済みの場合、defer 内の Rollback は何も変更しません。ID の採番は取り消されないため、失敗した注文の後は ID が飛ぶことがあります。
+
+この処理を真似するときは、`tx.Exec()` と `pool.Exec()` を混在させないことがポイントです。後者の書き込みは、そのトランザクションに含まれません。今回のように一つのリソースの保存に閉じた処理はリポジトリにまとめ、複数のリソースを横断する業務処理が必要になった段階でサービス層を検討できます。
+
+### 差分を読む順番
+
+```sh
+git diff main...example/order-transaction
+```
+
+1. [up migration](migrations/000002_create_orders.up.sql) と [down migration](migrations/000002_create_orders.down.sql)：親子テーブル、外部キー、注文内の SKU 重複を防ぐ制約。
+2. [model.go](internal/resources/orders/model.go)：入力と出力の型。
+3. [repository.go](internal/resources/orders/repository.go)：トランザクションの範囲と、特定の DB 制約違反から業務エラーへの変換。
+4. [handler.go](internal/resources/orders/handler.go) と [app.go](internal/app/app.go)：入力チェック、HTTP ステータス、ルート登録。
+5. [handler_test.go](internal/resources/orders/handler_test.go) と [orders_integration_test.go](internal/app/orders_integration_test.go)：入力の境界値、成功時の保存、失敗時の全取消。
+
+テストは通常の `go test ./...` で入力チェックを実行できます。トランザクションの確認には PostgreSQL を指定します。
+
+```sh
+TEST_DATABASE_URL='postgres://app:app_dev_password@localhost:5432/appdb?sslmode=disable' go test -count=1 ./...
+```
+
+統合テストは専用の一時スキーマを作成し、終了時に削除します。SKU 重複後の HTTP ステータスに加えて、両テーブルの件数が増えていないこと、以前の注文が変わらないこと、次の注文を作れることを確認します。down migration で注文のテーブルだけが削除され、既存のタスクが残ることも確認します。`TEST_DATABASE_URL` が未指定の場合、DB を使うテストはスキップします。
+
+このサンプルは `main` から独立したブランチです。他のリソース追加サンプルと組み合わせる場合は、マイグレーション番号の重複を調整してください。
+
 ## コマンド一覧
 
 | コマンド | 内容 |
@@ -288,7 +357,7 @@ POST /api/v1/tasks
 
 **[internal/app/app.go](internal/app/app.go)**
 
-`Router()` と `Run()` を定義します。`Router()` はリクエスト ID、panic の回復、30 秒の処理期限、HTTP ステータス付きのアクセスログを設定し、ヘルスチェックとタスク API のルートを登録します。`/health` はプロセスの応答、`/ready` は 2 秒の期限で DB 接続を確認します。30 秒の期限は context による通知で、処理を強制的に停止するものではありません。
+`Router()` と `Run()` を定義します。`Router()` はリクエスト ID、panic の回復、30 秒の処理期限、HTTP ステータス付きのアクセスログを設定し、ヘルスチェックとタスク API・注文 API のルートを登録します。`/health` はプロセスの応答、`/ready` は 2 秒の期限で DB 接続を確認します。30 秒の期限は context による通知で、処理を強制的に停止するものではありません。
 
 `Run()` は HTTP サーバーを起動し、終了通知を受けたら `Shutdown()` で処理中のリクエストの完了を待ちます。待機期限を超えた場合などは `Close()` を呼びます。新しいリソースの登録、認証などの共通処理の追加、HTTP サーバー設定の変更を行う場所です。
 
