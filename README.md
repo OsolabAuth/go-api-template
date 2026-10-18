@@ -46,6 +46,7 @@ if [ ! -f .env ]; then cp .env.example .env; fi
 | `POSTGRES_DB` | `appdb` | ローカル DB 名 |
 | `DATABASE_URL` | 他の変数から組み立てる接続 URL | ホストで起動する API の DB 接続先 |
 | `DB_MAX_CONNS` | `5` | API プロセスごとの最大 DB 接続数 |
+| `EXTERNAL_API_URL` | `https://jsonplaceholder.typicode.com` | 外部記事 API の接続先オリジン |
 
 API はホスト上で起動し、サンプルの `DATABASE_URL` で `localhost` の DB に接続します。マイグレーション用コンテナは `db:5432` に接続します。
 
@@ -222,6 +223,60 @@ make test
 
 新しい DB で使い始める前ならサンプルのマイグレーションを置き換えられます。運用開始後は適用済みのファイルを編集せず、新しい番号のマイグレーションを追加してください。API はマイグレーションを自動実行しません。
 
+## 開発サンプル: 外部 HTTP API との連携
+
+このブランチは、[JSONPlaceholder の公式 API](https://jsonplaceholder.typicode.com/) の `GET /posts/{id}` を呼び出す例です。`main` との差分を、設定 → HTTP クライアント → ハンドラー → ルート登録 → テストの順に読めます。
+
+```sh
+git diff main...example/external-api -- .env.example internal/config
+git diff main...example/external-api -- internal/integrations/posts
+git diff main...example/external-api -- internal/resources/externalposts internal/app
+```
+
+| ファイル | 追加する責任 |
+| --- | --- |
+| `.env.example`、`internal/config/config.go` | 外部サービスの接続先を環境変数から読む |
+| `internal/integrations/posts/client.go` | HTTP 接続の再利用、期限、サイズ上限、応答の検証 |
+| `internal/resources/externalposts/handler.go` | ID の検証と外部エラーから API のステータスへの変換 |
+| `internal/app/app.go` | 起動時にクライアントを作り、ハンドラーへ渡す。終了時に待機中の接続を閉じる |
+| `internal/integrations/posts/client_test.go`、`internal/app/external_posts_test.go` | `httptest.Server` で上流を再現し、成功・障害を検証 |
+
+通常の手順で DB と API を起動した後、別のターミナルで試せます。既存の `.env` に新しい変数がなくても既定値で動きます。
+
+```sh
+# 上流の /posts/1 を取得。id、userId、title、body を返す
+curl -i http://localhost:8080/api/v1/external/posts/1
+
+# 不正な ID は上流へ送らず 400
+curl -i http://localhost:8080/api/v1/external/posts/0
+
+# 存在しない記事は 404
+curl -i http://localhost:8080/api/v1/external/posts/999999
+```
+
+`EXTERNAL_API_URL` は `https://jsonplaceholder.typicode.com` のような接続先のオリジンです。HTTP または HTTPS を使い、パス・認証情報・クエリ・フラグメントは指定できません。実装をまねして別サービスへ変更する場合は、そのサービスのパスと応答形式を `client.go` で合わせます。本番の接続先を変更する場合は、実行環境にもこの変数を設定してください。
+
+URL はサーバーの設定と検証済みの数値 ID から作り、受信したクエリやリクエストヘッダーは転送しません。リダイレクトも追いません。外部サービスへのアクセスはこの API を呼んだときだけで、起動時と `/ready` では確認しません。
+
+| 上流の結果 | この API の応答 |
+| --- | --- |
+| 正常な記事の JSON | `200` |
+| `404` | `404` |
+| 接続から本文受信までの合計が 2 秒を超過 | `504` |
+| その他の非 2xx、接続失敗、不正な応答 | `502` |
+
+応答本文は最大 1 MiB です。JSON が壊れている、値が複数ある、記事 ID が一致しない、`userId` が正でない、`title` / `body` が空の場合も `502` にします。上流が追加した未知のフィールドは許容します。エラー時は詳細をログに残し、API のレスポンスには固定のエラーメッセージとリクエスト ID を返します。
+
+```sh
+# 外部サービスと DB に依存せず、正常・404・502・504 などを確認
+go test ./internal/integrations/posts ./internal/app -run 'TestNewClient|TestGetBounds|TestExternalPostAPI' -v
+
+# 既存テストも実行。DB 統合テストは TEST_DATABASE_URL 指定時に実行
+go test ./...
+```
+
+テストではローカルの HTTP サーバーが外部 API の役割を担います。ヘッダー待ちと本文待ちのタイムアウト、リダイレクト、接続失敗、壊れた JSON、応答サイズ上限、キャンセルを再現するため、実サービスの状態に左右されません。サンプルのタイムアウトを実環境へ適用するときは、呼び出すサービスと API 全体の応答時間に合わせて調整してください。
+
 ## コマンド一覧
 
 | コマンド | 内容 |
@@ -244,7 +299,7 @@ make test
 cmd/api/main.go
   → config.Load()       環境変数を読み込む
   → database.Open()     DB 接続プールを作り、接続を確認する
-  → app.Run()           HTTP サーバーを起動する
+  → app.Run()           外部 API クライアントを作り、HTTP サーバーを起動する
       → app.Router()    URL と処理を結び付ける
 ```
 
@@ -272,13 +327,13 @@ POST /api/v1/tasks
 
 **[internal/config/config.go](internal/config/config.go)**
 
-`Config` 構造体と `Load()` を定義します。`PORT`、`DATABASE_URL`、`DB_MAX_CONNS` を環境変数から読み、DB 接続 URL の必須チェックと最大接続数の正数チェックを行います。ヘッダー読み取りの期限は 5 秒、終了待ち時間は 10 秒で、現状はコード内の固定値です。
+`Config` 構造体と `Load()` を定義します。`PORT`、`DATABASE_URL`、`DB_MAX_CONNS`、`EXTERNAL_API_URL` を環境変数から読み、DB 接続 URL の必須チェックと最大接続数の正数チェックを行います。ヘッダー読み取りの期限は 5 秒、終了待ち時間は 10 秒で、現状はコード内の固定値です。
 
 設定項目を増やすときは、このファイルにフィールド・読み込み・検証を追加します。ここでは `.env` を開きません。ローカル用ファイルの読み込みは Makefile と Compose が担当し、Go のコードは渡された環境変数だけを参照します。
 
 **[internal/config/config_test.go](internal/config/config_test.go)**
 
-`DATABASE_URL` が空のとき、`Load()` がエラーになることを確認するテストです。設定値の検証を追加したら、その正常値・異常値のテストもここに追加します。現在はこの一つのケースだけを確認しています。
+`DATABASE_URL` が空のとき、`Load()` がエラーになることを確認するテストです。設定値の検証を追加したら、その正常値・異常値のテストもここに追加します。外部 API の接続先については、既定値と環境変数による上書きも確認します。
 
 **[internal/database/database.go](internal/database/database.go)**
 
@@ -288,9 +343,9 @@ POST /api/v1/tasks
 
 **[internal/app/app.go](internal/app/app.go)**
 
-`Router()` と `Run()` を定義します。`Router()` はリクエスト ID、panic の回復、30 秒の処理期限、HTTP ステータス付きのアクセスログを設定し、ヘルスチェックとタスク API のルートを登録します。`/health` はプロセスの応答、`/ready` は 2 秒の期限で DB 接続を確認します。30 秒の期限は context による通知で、処理を強制的に停止するものではありません。
+`Router()` と `Run()` を定義します。`Router()` はリクエスト ID、panic の回復、30 秒の処理期限、HTTP ステータス付きのアクセスログを設定し、ヘルスチェック、タスク API、外部記事 API のルートを登録します。`/health` はプロセスの応答、`/ready` は 2 秒の期限で DB 接続を確認します。30 秒の期限は context による通知で、処理を強制的に停止するものではありません。
 
-`Run()` は HTTP サーバーを起動し、終了通知を受けたら `Shutdown()` で処理中のリクエストの完了を待ちます。待機期限を超えた場合などは `Close()` を呼びます。新しいリソースの登録、認証などの共通処理の追加、HTTP サーバー設定の変更を行う場所です。
+`Run()` は外部 API クライアントを生成して `Router()` に渡し、HTTP サーバーを起動し、終了通知を受けたら `Shutdown()` で処理中のリクエストの完了を待ちます。待機期限を超えた場合などは `Close()` を呼びます。終了時には外部 API の待機中の接続も閉じます。新しいリソースの登録、認証などの共通処理の追加、HTTP サーバー設定の変更を行う場所です。
 
 **[internal/common/json.go](internal/common/json.go)**
 
