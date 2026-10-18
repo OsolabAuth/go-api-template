@@ -23,7 +23,7 @@ func TestAccessLogIncludesResponseStatus(t *testing.T) {
 	} {
 		t.Run(tt.path, func(t *testing.T) {
 			var logs bytes.Buffer
-			router := Router(nil, slog.New(slog.NewJSONHandler(&logs, nil))).(*chi.Mux)
+			router := Router(nil, nil, slog.New(slog.NewJSONHandler(&logs, nil))).(*chi.Mux)
 			router.Get("/panic", func(http.ResponseWriter, *http.Request) { panic("test panic") })
 			router.Get("/empty", func(http.ResponseWriter, *http.Request) {})
 			request := httptest.NewRequest(http.MethodGet, tt.path, nil)

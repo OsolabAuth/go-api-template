@@ -10,13 +10,15 @@ import (
 
 	"example.com/go-api-template/internal/common"
 	"example.com/go-api-template/internal/config"
+	"example.com/go-api-template/internal/integrations/posts"
+	"example.com/go-api-template/internal/resources/externalposts"
 	"example.com/go-api-template/internal/resources/tasks"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func Router(db *pgxpool.Pool, logger *slog.Logger) http.Handler {
+func Router(db *pgxpool.Pool, external *posts.Client, logger *slog.Logger) http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(func(next http.Handler) http.Handler {
@@ -46,10 +48,16 @@ func Router(db *pgxpool.Pool, logger *slog.Logger) http.Handler {
 		common.JSON(w, 200, map[string]string{"status": "ready"})
 	})
 	r.Mount("/api/v1/tasks", tasks.NewHandler(tasks.NewRepository(db), logger).Routes())
+	r.Mount("/api/v1/external/posts", externalposts.NewHandler(external, logger).Routes())
 	return r
 }
 func Run(ctx context.Context, cfg config.Config, db *pgxpool.Pool, logger *slog.Logger) error {
-	server := &http.Server{Addr: ":" + cfg.Port, Handler: Router(db, logger), ReadHeaderTimeout: cfg.ReadHeaderTimeout}
+	external, err := posts.NewClient(cfg.ExternalAPIURL, 2*time.Second)
+	if err != nil {
+		return fmt.Errorf("external API configuration: %w", err)
+	}
+	defer external.CloseIdleConnections()
+	server := &http.Server{Addr: ":" + cfg.Port, Handler: Router(db, external, logger), ReadHeaderTimeout: cfg.ReadHeaderTimeout}
 	serverErr := make(chan error, 1)
 	go func() { serverErr <- server.ListenAndServe() }()
 	logger.Info("server listening", "port", cfg.Port)
