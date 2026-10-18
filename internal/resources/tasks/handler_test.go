@@ -34,7 +34,7 @@ func TestCreateTitleCharacterLimit(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			var logs bytes.Buffer
-			handler := NewHandler(NewRepository(pool), slog.New(slog.NewJSONHandler(&logs, nil)))
+			handler := NewHandler(NewRepository(pool), nil, slog.New(slog.NewJSONHandler(&logs, nil)))
 			body, err := json.Marshal(CreateTask{Title: tt.title})
 			if err != nil {
 				t.Fatal(err)

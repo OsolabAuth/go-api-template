@@ -50,7 +50,7 @@ func Router(db *pgxpool.Pool, redisClient *redis.Client, logger *slog.Logger) ht
 		}
 		common.JSON(w, 200, map[string]string{"status": "ready"})
 	})
-	r.Mount("/api/v1/tasks", tasks.NewHandler(tasks.NewRepository(db), logger).Routes())
+	r.Mount("/api/v1/tasks", tasks.NewHandler(tasks.NewRepository(db), redisClient, logger).Routes())
 	return r
 }
 func Run(ctx context.Context, cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client, logger *slog.Logger) error {

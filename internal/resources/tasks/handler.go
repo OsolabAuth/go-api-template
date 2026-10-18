@@ -11,15 +11,17 @@ import (
 	"example.com/go-api-template/internal/common"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/redis/go-redis/v9"
 )
 
 type Handler struct {
 	repo   *Repository
+	redis  *redis.Client
 	logger *slog.Logger
 }
 
-func NewHandler(repo *Repository, logger *slog.Logger) *Handler {
-	return &Handler{repo: repo, logger: logger}
+func NewHandler(repo *Repository, redisClient *redis.Client, logger *slog.Logger) *Handler {
+	return &Handler{repo: repo, redis: redisClient, logger: logger}
 }
 func (h *Handler) Routes() http.Handler {
 	r := chi.NewRouter()
@@ -61,6 +63,10 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 		common.Error(w, r, 400, "invalid task id")
 		return
 	}
+	if task, ok := h.cachedTask(r.Context(), id); ok {
+		common.JSON(w, http.StatusOK, task)
+		return
+	}
 	task, err := h.repo.Get(r.Context(), id)
 	if errors.Is(err, ErrNotFound) {
 		common.Error(w, r, 404, "task not found")
@@ -70,6 +76,7 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 		h.internalError(w, r, err)
 		return
 	}
+	h.cacheTask(r.Context(), task)
 	common.JSON(w, 200, task)
 }
 func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
@@ -79,6 +86,9 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	err := h.repo.Delete(r.Context(), id)
+	if err == nil || errors.Is(err, ErrNotFound) {
+		h.invalidateTask(r.Context(), id)
+	}
 	if errors.Is(err, ErrNotFound) {
 		common.Error(w, r, 404, "task not found")
 		return

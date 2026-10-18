@@ -1,6 +1,6 @@
 # Go API テンプレートの使い方
 
-Go と PostgreSQL で API サーバーを作るためのテンプレートです。このブランチでは、外部接続先を増やす例として Redis を追加しています。Redis は起動と readiness の必須依存です。HTTP ルーティングに chi、DB 接続に pgxpool、ログに標準ライブラリの slog を使います。ORM は使わず、サンプルとしてタスクの作成・一覧・取得・削除 API を実装しています。
+Go と PostgreSQL で API サーバーを作るためのテンプレートです。このブランチは [Redis 接続追加の PR #5](https://github.com/OsolabAuth/go-api-template/pull/5) をベースに、タスク単体取得のキャッシュを追加したサンプルです。Redis は起動と readiness の必須依存です。HTTP ルーティングに chi、DB 接続に pgxpool、ログに標準ライブラリの slog を使います。ORM は使わず、サンプルとしてタスクの作成・一覧・取得・削除 API を実装しています。
 
 ローカルでは `.env` を使い、本番では実行環境から環境変数を渡します。Docker イメージのビルドに `.env` や DB 接続情報は不要です。
 
@@ -125,7 +125,7 @@ TEST_DATABASE_URL='postgres://app:app_dev_password@localhost:5432/appdb?sslmode=
 
 この統合テストは専用の一時スキーマにマイグレーションを適用し、終了時にそのスキーマだけを削除します。既存のテーブルやデータは変更しません。接続ユーザーにはスキーマ作成権限が必要です。`TEST_DATABASE_URL` が未指定の場合、このテストだけスキップします。タスク API の統合テストには Redis は不要です。
 
-Redis の接続と、DB・Redis が利用できるときだけ readiness が成功することも確認できます。テストは Redis への `PING` だけを使い、既存キーは変更しません。
+Redis の接続と、DB・Redis が利用できるときだけ readiness が成功することも確認できます。接続テストは `PING` を使います。キャッシュの統合テストは専用の一時 DB スキーマと、他のタスクと重複しない高位 ID のキーを使います。終了時は自分が作ったキーだけを削除し、`FLUSHDB` は実行しません。
 
 ```sh
 TEST_DATABASE_URL='postgres://app:app_dev_password@localhost:5432/appdb?sslmode=disable' \
@@ -239,9 +239,9 @@ make test
 
 新しい DB で使い始める前ならサンプルのマイグレーションを置き換えられます。運用開始後は適用済みのファイルを編集せず、新しい番号のマイグレーションを追加してください。API はマイグレーションを自動実行しません。
 
-## 9 接続先追加の差分を読む
+## 9 ベースとなる接続先追加の差分を読む
 
-このブランチは `main` を起点に Redis 接続を追加した、独立した開発サンプルです。
+ベースの `example/redis-connection` は、`main` を起点に Redis 接続を追加したサンプルです。まず接続を追加する場所を確認するには、次の差分を読みます。
 
 ```sh
 git diff main...example/redis-connection
@@ -257,7 +257,57 @@ git diff main...example/redis-connection
 6. `compose.yaml` / `Makefile`：開発用 Redis の起動と、本番の `REDIS_URL` シークレット設定を追加します。
 7. `internal/cache/*_test.go` / `internal/app/redis_integration_test.go`：不正な設定、接続中止、接続成功、依存先が使えないときの `503` を確認します。
 
-この例では Redis をアプリの必須依存として扱います。Redis が停止すると、タスク自体の保存先は PostgreSQL のままでも `/ready` は `503` になります。タスクのキャッシュやキーの読み書きは追加していません。ローカル Redis のポートは `127.0.0.1` にだけ公開し、永続化用ボリュームは用意していません。
+この例では Redis をアプリの必須依存として扱います。Redis が停止すると、タスク自体の保存先は PostgreSQL のままでも `/ready` は `503` になります。キャッシュ利用を追加した現在のブランチでも、この起動・readiness の仕様は維持しています。ローカル Redis のポートは `127.0.0.1` にだけ公開し、永続化用ボリュームは用意していません。
+
+## 10 Redis を実際に使う差分を読む
+
+キャッシュ利用の追加分だけを確認するには、接続追加ブランチとの差分を読みます。
+
+```sh
+git diff example/redis-connection...example/redis-task-cache
+```
+
+1. `internal/resources/tasks/cache.go`：タスク専用のキー、10 秒の TTL、JSON の検証、Redis の GET / SET / DEL。各 Redis 操作にはリクエスト context から派生した 100 ms の期限を設定します。
+2. `internal/resources/tasks/handler.go`：単体 GET はキャッシュを先に読み、miss・不正なデータ・Redis エラーなら元のリクエスト context で PostgreSQL を読みます。DB で取得できた結果だけをキャッシュへ入れます。DELETE は DB の削除成功後にキャッシュを削除し、DB に既に存在しない場合も古いキーを削除します。
+3. `internal/app/app.go`：起動済みの Redis クライアントをタスクハンドラーへ渡します。新しい接続はリクエストごとには作りません。
+4. `internal/resources/tasks/cache_test.go` / `internal/app/task_cache_integration_test.go`：無効なデータ、キャッシュのヒットと TTL、削除時の無効化、Redis 障害・遅延時の DB フォールバックを確認します。
+
+一覧と作成は PostgreSQL を直接使います。更新 API を後から追加する場合は、更新成功時にも同じキーを無効化します。単体 GET のキャッシュキーは `go-api-template:tasks:v1:<id>`、値は API と同じ Task の JSON です。GET のヒット時に TTL は延長しません。存在しないタスクはキャッシュしません。**同じ Redis の DB 番号を複数のサービス・環境で共有するときは、`cache.go` の `taskCachePrefix` をサービス・環境ごとに変えてください。** 独立した DB に同じタスク ID があっても、キャッシュが混ざらないようにします。
+
+起動手順は前述の `make db-up` → `make redis-up` → `make migrate-up` → `make dev` です。次の例でキャッシュの作成と削除を確認できます。
+
+```sh
+curl -sS -X POST http://localhost:8080/api/v1/tasks \
+  -H 'Content-Type: application/json' -d '{"title":"キャッシュを試す"}'
+TASK_ID=1 # 作成レスポンスの id に置き換える
+
+# 初回 GET は DB から読み、Redis に 10 秒間保存する
+curl -sS "http://localhost:8080/api/v1/tasks/$TASK_ID"
+docker compose exec redis redis-cli GET "go-api-template:tasks:v1:$TASK_ID"
+docker compose exec redis redis-cli TTL "go-api-template:tasks:v1:$TASK_ID"
+
+# 期限内の再取得はキャッシュから返る
+curl -sS "http://localhost:8080/api/v1/tasks/$TASK_ID"
+
+# DB を削除し、Redis のキーを無効化する
+curl -i -X DELETE "http://localhost:8080/api/v1/tasks/$TASK_ID"
+docker compose exec redis redis-cli EXISTS "go-api-template:tasks:v1:$TASK_ID"
+curl -i "http://localhost:8080/api/v1/tasks/$TASK_ID" # 404
+```
+
+Redis の GET / SET / DEL が失敗しても、DB の取得・削除結果を返して WARN ログを残します。Redis は引き続き起動時と `/ready` の必須依存なので、障害中の `/ready` は `503` になります。稼働済みの API にリクエストが到達すれば DB にフォールバックできますが、ロードバランサーが readiness に従って配信を止める構成では、その経路からは利用できません。
+
+このサンプルは結果整合性のあるキャッシュです。DB が正本であり、キャッシュヒットが常に最新であることは保証しません。DELETE の無効化に失敗した場合や、DB の古い値を読んだ GET が DELETE 後にキャッシュを書き戻した場合は、削除済みタスクが一時的に `200` で返ることがあります。各値は SET から 10 秒で失効しますが、処理中の GET が後から SET する可能性があるため、「DELETE から必ず 10 秒以内」という保証ではありません。更新・削除直後の厳密な整合性が必要な API では、この単純なキャッシュ方式をそのまま使わないでください。
+
+```sh
+# DB・Redis 不要の入力検証テストを含む通常テスト
+make test
+
+# DB・Redis とのキャッシュ動作を HTTP 経由で確認
+TEST_DATABASE_URL='postgres://app:app_dev_password@localhost:5432/appdb?sslmode=disable' \
+TEST_REDIS_URL='redis://localhost:6379/0' \
+go test ./internal/app -run '^TestTaskCacheAPI$' -v
+```
 
 ## コマンド一覧
 
@@ -361,6 +411,10 @@ HTTP リクエストを受け取り、リポジトリを呼び出してレスポ
 作成時はタイトル前後の空白を除去し、空文字と長さ超過を拒否します。`utf8.RuneCountInString()` によって Unicode コードポイント単位で 1〜200 文字を受け付けます。JSON の解析失敗は `400`、対象がない場合は `404`、DB などの内部エラーは原因とリクエスト ID をログに記録し、クライアントには詳細を含めず `500` を返します。
 
 エンドポイント、入力チェック、HTTP ステータスを変更する場所です。複雑な業務ロジックが増えたら、同じディレクトリに `service.go` を追加して切り出せます。
+
+**[internal/resources/tasks/cache.go](internal/resources/tasks/cache.go)**
+
+単体タスクのキャッシュだけを扱う補助処理です。キャッシュの URL や接続管理は既存の `internal/cache` に任せます。TTL・キー形式・Redis への操作とキャッシュ内容の検証をまとめ、障害時は DB 処理を続けられるようにします。汎用キャッシュインターフェースは設けていません。
 
 **[internal/resources/tasks/repository.go](internal/resources/tasks/repository.go)**
 
