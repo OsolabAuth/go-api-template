@@ -44,10 +44,11 @@ jobs:
           {
             echo '## Go coverage'
             echo 'PostgreSQL の統合テストを含むカバレッジです。'
-            echo '```text'
-            cat coverage/summary.txt
-            echo '```'
-            echo '行ごとの結果は coverage-report をダウンロードし、index.html をブラウザで開いて確認できます。'
+            echo
+            cat coverage/summary.md
+            echo
+            echo 'common.html は共通処理、app.html は API 固有処理、index.html は全体です。'
+            echo 'Artifacts の coverage-report をダウンロードし、各 HTML をブラウザで開いて確認できます。'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Upload coverage report
         uses: actions/upload-artifact@v7

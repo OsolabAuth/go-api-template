@@ -144,11 +144,22 @@ TEST_DATABASE_URL='postgres://app:app_dev_password@localhost:5432/appdb?sslmode=
 
 `make coverage` は `.env` を読み込みません。統合テストを含めるときは `TEST_DATABASE_URL` を明示してください。
 
-- ターミナルと `coverage/summary.txt` に関数ごとの割合と全体の `total` を表示します。
-- `coverage/index.html` をブラウザで開くと、ファイルを選んで実行済み・未実行のコードを色分けして確認できます。
-- `coverage/coverage.out` は Go 標準形式の生データです。生成物は Git と Docker のビルド対象から除外します。
+- ターミナルと `coverage/summary.md` に「共通処理」「API 固有処理」「全体」の割合を表示します。
+- 共通処理は `internal/common/` 配下の JSON 入出力・エラー処理です。API 固有処理はそれ以外すべてで、設定・DB 接続・ルート・起動処理も含みます。
 
-内部では `go test -coverpkg=./... -coverprofile=...` と [Go 標準のカバレッジツール](https://go.dev/doc/build-cover)を使います。全パッケージを計測対象にするため、HTTP の統合テストから呼ばれたリポジトリや共通処理も結果に反映されます。起動処理などの未実行コードも分母に含めます。DB なしの結果と統合テストを含む結果では割合が変わります。
+| 対象 | HTML（ブラウザで開く） | 関数ごとの集計 | Go 標準の生データ |
+| --- | --- | --- | --- |
+| 共通処理 | `coverage/common.html` | `coverage/common.txt` | `coverage/common.out` |
+| API 固有処理 | `coverage/app.html` | `coverage/app.txt` | `coverage/app.out` |
+| 全体 | `coverage/index.html` | `coverage/summary.txt` | `coverage/coverage.out` |
+
+各 HTML でファイルを選ぶと、実行済み・未実行のコードを色分けして確認できます。生成物は Git と Docker のビルド対象から除外します。
+
+内部の `scripts/coverage.sh` では `go test -coverpkg=./... -coverprofile=...` と [Go 標準のカバレッジツール](https://go.dev/doc/build-cover)を使います。全パッケージを計測対象にするため、HTTP の統合テストから呼ばれたリポジトリや共通処理も結果に反映されます。起動処理などの未実行コードも分母に含めます。DB なしの結果と統合テストを含む結果では割合が変わります。
+
+テストは1回だけ実行し、その同じ計測データをファイルの所属パッケージで分割します。各記録は必ず片方に分類するため、対象の重複や取りこぼしを防げます。全体の割合は元の計測データから算出し、2グループの割合を単純平均しません。
+
+共通処理の範囲を変更するときは、スクリプトの `common_prefix` による分類を変更してください。モジュール名は `go list -m` で取得するため、プロジェクト名を変えても固定文字列の置き換えは不要です。共通処理または API 固有処理が空になった場合は、分類設定を見直せるようエラーにします。
 
 カバレッジは実行された文の割合です。まずは未確認の処理を探すために使い、合格の最低割合は設定していません。
 
@@ -158,8 +169,8 @@ TEST_DATABASE_URL='postgres://app:app_dev_password@localhost:5432/appdb?sslmode=
 
 1. CI 専用の PostgreSQL を起動します。本番の接続情報やシークレットは不要です。
 2. `go vet`、統合テストを含む `make coverage`、API の Go ビルドを実行します。
-3. Actions の実行ページの **Summary** に関数ごとの割合と全体の `total` を表示します。
-4. 同じページの **Artifacts → coverage-report** をダウンロードし、展開した `index.html` をブラウザで開きます。レポートの保存期間は14日です。
+3. Actions の実行ページの **Summary** に「共通処理」「API 固有処理」「全体」を分けて表示します。
+4. 同じページの **Artifacts → coverage-report** をダウンロードし、展開した `common.html`・`app.html`・`index.html` をブラウザで開きます。レポートの保存期間は14日です。
 
 PR の Checks から、このワークフローの実行ページに移動できます。テストが失敗するとチェックも失敗し、その実行のレポートは公開しません。
 
@@ -267,19 +278,20 @@ make test
 
 新しい DB で使い始める前ならサンプルのマイグレーションを置き換えられます。運用開始後は適用済みのファイルを編集せず、新しい番号のマイグレーションを追加してください。API はマイグレーションを自動実行しません。
 
-## テストと CI を追加する差分の読み方
+## 共通処理と API のカバレッジを分ける差分の読み方
 
-`example/test-coverage` は `main` を起点にした独立した開発サンプルです。
+`example/split-coverage` は [PR #6 のテスト・CI サンプル](https://github.com/OsolabAuth/go-api-template/pull/6)を土台にしています。追加部分だけを確認するときは、次を実行します。
 
 ```sh
-git diff main...example/test-coverage
+git diff example/test-coverage...example/split-coverage
 ```
 
-1. `internal/common/json_test.go` / `internal/config/config_test.go`：入力や設定の契約をテストする。
-2. `Makefile`：既存の単体・統合テストをまとめて計測し、テキストと HTML にする。
-3. `.github/workflows/test.yml`：テスト用 DB を用意し、同じコマンドを CI で実行してレポートを保存する。
-4. `.gitignore` / `.dockerignore`：生成物を除外する。
-5. `README.md`：ローカルと PR での確認手順を共有する。
+1. `scripts/coverage.sh`：全パッケージを1回計測し、共通処理とそれ以外に分けてレポートを生成する。
+2. `Makefile`：既存の `make coverage` からスクリプトを呼び出す。
+3. `.github/workflows/test.yml`：2つの区分と全体の割合を Summary に表示し、各 HTML を保存する。
+4. `README.md`：分類の基準、結果の見方、変更する場所を説明する。
+
+このサンプルは、共通ライブラリの切り出し前にカバレッジを分けて確認する段階です。共通部分はまだ同じ Go モジュール内にあり、別リポジトリへの公開やバージョンタグの追加は行いません。
 
 ## コマンド一覧
 
@@ -290,7 +302,7 @@ git diff main...example/test-coverage
 | `make migrate-down` | ローカル DB のマイグレーションを一つ戻す。サンプルでは tasks テーブルとデータが削除される |
 | `make dev` | `.env` を読み込んでホスト上で API を起動 |
 | `make test` | Go のテストを実行 |
-| `make coverage` | テストと全パッケージのカバレッジ計測、HTML レポート生成 |
+| `make coverage` | テストとカバレッジ計測、共通・API・全体の HTML レポート生成 |
 | `make build` | 本番用 Docker イメージを作成 |
 | `make deploy` | イメージのビルド・push と Cloud Run へのデプロイ |
 
